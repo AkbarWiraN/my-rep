@@ -1,19 +1,19 @@
 // scanner.js - Silent Endpoint & Secrets Scanner (bookmarklet)
-// - No process logs shown anywhere (silent mode)
-// - Detects parameters, hidden endpoints, firebase hints, tokens/keys/password-like strings
-// - UI: floating panel bottom, results only
-// - Export: .txt (URL + sensitive findings). Option to include raw secrets in export.
-// Usage: load via bookmarklet loader (jsDelivr raw hosted file)
-
+// - Silent: no processing logs shown
+// - Realtime filter refresh, remove jwt-like detection (too noisy)
+// - Export .txt behavior respects active filter; if 'all' then grouped by category
+// - Keeps existing detection features (params, firebase, keys, etc.)
+// - Ignore list excludes noisy CDNs but DOES NOT ignore jsdelivr or githack
+// Usage: load via bookmarklet loader
 (async function(){
-  // --- UI ---
+  // UI
   const panel = document.createElement('div');
   Object.assign(panel.style, {
     position: 'fixed',
     right: '12px',
     bottom: '12px',
-    width: '420px',
-    maxHeight: '70vh',
+    width: '460px',
+    maxHeight: '76vh',
     overflowY: 'auto',
     backgroundColor: '#fff',
     color: '#111',
@@ -22,7 +22,7 @@
     border: '1px solid #ddd',
     borderRadius: '8px',
     boxShadow: '0 6px 18px rgba(0,0,0,0.12)',
-    fontFamily: 'Inter, Arial, sans-serif',
+    fontFamily: 'Arial, sans-serif',
     fontSize: '13px'
   });
 
@@ -41,8 +41,8 @@
       <label style="font-size:12px"><input id="detect-keys" type="checkbox" checked style="vertical-align:middle"> Detect</label>
     </div>
   </div>
-  <div id="results" style="max-height:56vh;overflow:auto;border-top:1px solid #eee;padding-top:8px"></div>
-  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+  <div id="results" style="max-height:60vh;overflow:auto;border-top:1px solid #eee;padding-top:8px"></div>
+  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;flex-wrap:wrap">
     <label style="font-size:12px"><input id="include-raw" type="checkbox"> Include raw secrets in export</label>
     <button id="copy-all" style="padding:6px 8px">Copy</button>
     <button id="export-txt" style="padding:6px 8px">Export .txt</button>
@@ -57,25 +57,28 @@
   const detectKeysCheckbox = panel.querySelector('#detect-keys');
   const includeRawCheckbox = panel.querySelector('#include-raw');
 
-  // --- config ---
+  // config
   const MAX_DEPTH = 3;
   const excludedHosts = [
     /(^|\.)googleapis\.com$/,
     /(^|\.)gstatic\.com$/,
     /(^|\.)googleusercontent\.com$/,
     /(^|\.)cloudflare\.com$/,
-    /(^|\.)cdnjs\.cloudflare\.com$/
+    /(^|\.)cdnjs\.cloudflare\.com$/,
+    /(^|\.)fontawesome\.com$/,
+    /(^|\.)avatars\.githubusercontent\.com$/,
+    /(^|\.)unpkg\.com$/,
+    /(^|\.)gravatar\.com$/
+    // NOTE: jsdelivr & githack are intentionally NOT excluded
   ];
 
-  // --- detectors ---
+  // detectors (jwt detection removed to reduce noise)
   const DET = {
     firebaseApiKey: /AIza[0-9A-Za-z\-_]{35}/g,
     firebaseDB: /(https?:\/\/[A-Za-z0-9\-]+(?:\.firebaseio\.com|\.firebasedatabase\.app))(?:[:\/\w\-\.\?\=\&]*)/gi,
     firebaseProjectId: /["'\s]projectId["']?\s*[:=]\s*["']?([a-z0-9\-]{6,})["']?/gi,
     firebaseStorage: /["'\s]storageBucket["']?\s*[:=]\s*["']?([a-z0-9\-\.]+(?:appspot\.com|storage\.googleapis\.com)?)["']?/gi,
     googleClientId: /[0-9]{1,}-[0-9A-Za-z_]+\.apps\.googleusercontent\.com/g,
-    bearerJwt: /\bBearer\s+([A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+)\b/gi,
-    jwtLike: /\b([A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+)\b/g,
     awsKey: /\b(A3T|AKIA|ASIA)[A-Z0-9]{16}\b/g,
     longHex: /\b[0-9a-fA-F]{32,}\b/g,
     pwdParam: /(?:password|pwd|pass|secret|token|api[_-]?key|apikey|access[_-]?token|client_secret|private_key)\s*(?:=|:)\s*['"]?([^\s'";,<>]{4,200})/gi,
@@ -97,14 +100,15 @@
     }
   }
 
-  // storage for results
+  // results store
   const seen = new Set();
-  const found = new Map(); // url -> { params:Set, sensitive: Array<{type,value}>, source, local, apiLike, firebaseMeta:{} }
+  const found = new Map();
+  // found: url -> { params:Set, sensitive: [{type,value}], source, local, apiLike, firebaseMeta:{} }
 
   function addFound(url, source='detected'){
     try{
       const abs = new URL(url, location.href).href;
-      if(!found.has(abs)) {
+      if(!found.has(abs)){
         found.set(abs, { params: new Set(), sensitive: [], source, local: isLocal(abs), apiLike: isApiLike(abs), firebaseMeta: {} });
       }
       return abs;
@@ -138,18 +142,13 @@
     for(const m of text.matchAll(DET.firebaseProjectId) || []) res.push({type:'firebase_project_id', value:m[1]});
     for(const m of text.matchAll(DET.firebaseStorage) || []) res.push({type:'firebase_storage_bucket', value:m[1]});
     for(const m of text.matchAll(DET.googleClientId) || []) res.push({type:'google_client_id', value:m[0]});
-    for(const m of text.matchAll(DET.bearerJwt) || []) res.push({type:'bearer_jwt', value:m[1]});
-    for(const m of text.matchAll(DET.jwtLike) || []) {
-      const v = m[1] || m[0];
-      if(v.split('.').length===3 && v.length>20) res.push({type:'jwt_like', value:v});
-    }
     for(const m of text.matchAll(DET.awsKey) || []) res.push({type:'aws_key', value:m[0]});
     for(const m of text.matchAll(DET.longHex) || []) res.push({type:'long_hex', value:m[0]});
     for(const m of text.matchAll(DET.pwdParam) || []) { if(m[1] && m[1].length>3) res.push({type:'password_like', value:m[1]}); }
     for(const m of text.matchAll(DET.urlWithPort) || []) res.push({type:'url_with_port', value:m[0]});
     // dedupe
     const uniq = [], seenv = new Set();
-    for(const it of res) { const key = it.type + '|' + it.value; if(!seenv.has(key)){ seenv.add(key); uniq.push(it); } }
+    for(const it of res){ const key = it.type + '|' + it.value; if(!seenv.has(key)){ seenv.add(key); uniq.push(it); } }
     return uniq;
   }
 
@@ -168,13 +167,12 @@
   async function process(url, depth=0, source='root'){
     if(depth > MAX_DEPTH) return;
     let abs;
-    try { abs = new URL(url, location.href).href; } catch(e){ return; }
+    try{ abs = new URL(url, location.href).href; }catch(e){ return; }
     if(seen.has(abs)) return;
     seen.add(abs);
     addFound(abs, source);
     const params = extractParams(abs);
     for(const p of params) found.get(abs).params.add(p);
-    // if not local origin, don't fetch (just record)
     if(!isLocal(abs)) return;
     const text = await fetchTextQuiet(abs);
     if(!text) return;
@@ -197,19 +195,19 @@
     }
   }
 
-  // gather resource candidates silently
+  // gather resources silently
   const resources = new Set();
-  try { performance.getEntriesByType('resource').map(r=>r.name).forEach(u=>resources.add(u)); } catch(e){}
+  try{ performance.getEntriesByType('resource').map(r=>r.name).forEach(u=>resources.add(u)); }catch(e){}
   document.querySelectorAll('script[src]').forEach(s => resources.add(s.src));
   document.querySelectorAll('script:not([src])').forEach(s => {
-    try { extractCandidatesFromText(s.textContent||'').forEach(p=>resources.add(p)); } catch(e){}
+    try{ extractCandidatesFromText(s.textContent||'').forEach(p=>resources.add(p)); }catch(e){}
   });
-  try { extractCandidatesFromText(document.documentElement.outerHTML||document.body.innerHTML).forEach(p=>resources.add(p)); } catch(e){}
+  try{ extractCandidatesFromText(document.documentElement.outerHTML||document.body.innerHTML).forEach(p=>resources.add(p)); }catch(e){}
 
-  // process all resources (silent)
-  for(const r of resources) { await process(r, 0, 'resource'); }
+  // process all (silent)
+  for(const r of resources){ await process(r, 0, 'resource'); }
 
-  // render results (no process logs)
+  // rendering + filter behavior
   function redact(val){
     if(!val) return '';
     const s = String(val);
@@ -243,10 +241,7 @@
 
   function render(){
     const rows = buildList();
-    if(rows.length === 0){
-      resultsDiv.innerHTML = `<div style="color:#666">No endpoints found.</div>`;
-      return;
-    }
+    if(rows.length === 0){ resultsDiv.innerHTML = `<div style="color:#666">No endpoints found.</div>`; return; }
     const html = rows.map(it => {
       const sensHtml = (it.sensitive && it.sensitive.length>0) ? `<div style="margin-top:6px;color:#900;font-weight:600">⚠ Sensitive (${it.sensitive.length})</div><ul style="margin:6px 0 0 16px;color:#333">${it.sensitive.map(s=>`<li><strong>${escapeHtml(s.type)}</strong>: <code>${escapeHtml(redact(s.value))}</code></li>`).join('')}</ul>` : '';
       const fbHtml = (it.firebaseMeta && Object.keys(it.firebaseMeta).length>0) ? `<div style="margin-top:6px;color:#0366d6"><strong>Firebase:</strong> ${Object.entries(it.firebaseMeta).map(([k,v])=>`${escapeHtml(k)}=${escapeHtml(redact(v))}`).join(', ')}</div>` : '';
@@ -267,9 +262,14 @@
 
   function escapeHtml(s){ if(!s) return ''; return String(s).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
+  // initial render
   render();
 
-  // copy all: URL + sensitive (raw values redacted unless includeRaw checked)
+  // realtime filter change -> render
+  filterSelect.onchange = render;
+  detectKeysCheckbox.onchange = render;
+
+  // copy
   panel.querySelector('#copy-all').onclick = async ()=>{
     const rows = buildList();
     const includeRaw = includeRawCheckbox.checked;
@@ -282,12 +282,15 @@
     try{ await navigator.clipboard.writeText(out); alert(`Copied ${rows.length} items`); }catch(e){ const ta=document.createElement('textarea'); ta.value=out; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); alert('Copied (fallback)'); }
   };
 
-  // export txt: URL + that sensitive block (raw if includeRaw)
+  // export .txt respects current filter
   panel.querySelector('#export-txt').onclick = ()=>{
+    const f = filterSelect.value;
     const rows = buildList();
     const includeRaw = includeRawCheckbox.checked;
     const lines = [];
-    for(const r of rows){
+
+    // helper to push item block
+    function pushItem(r){
       lines.push(`URL: ${r.url}`);
       if(r.params.length) lines.push(`Params: ${r.params.join(', ')}`);
       if(r.sensitive.length){
@@ -300,6 +303,28 @@
       }
       lines.push(''); // separator
     }
+
+    if(f === 'all'){
+      // group by category
+      const groups = { LOCAL:[], API:[], SENSITIVE:[], FIREBASE:[], EXTERNAL:[] };
+      for(const r of rows){
+        if(r.sensitive && r.sensitive.length>0) groups.SENSITIVE.push(r);
+        else if(Object.keys(r.firebaseMeta||{}).length>0) groups.FIREBASE.push(r);
+        else if(r.local) groups.LOCAL.push(r);
+        else if(r.apiLike) groups.API.push(r);
+        else groups.EXTERNAL.push(r);
+      }
+      // push groups in order
+      if(groups.LOCAL.length){ lines.push('=== LOCAL ENDPOINTS ===',''); groups.LOCAL.forEach(pushItem); lines.push(''); }
+      if(groups.API.length){ lines.push('=== API ENDPOINTS ===',''); groups.API.forEach(pushItem); lines.push(''); }
+      if(groups.SENSITIVE.length){ lines.push('=== SENSITIVE FINDINGS ===',''); groups.SENSITIVE.forEach(pushItem); lines.push(''); }
+      if(groups.FIREBASE.length){ lines.push('=== FIREBASE HINTS ===',''); groups.FIREBASE.forEach(pushItem); lines.push(''); }
+      if(groups.EXTERNAL.length){ lines.push('=== EXTERNAL ===',''); groups.EXTERNAL.forEach(pushItem); lines.push(''); }
+    } else {
+      // export only current filtered rows
+      for(const r of rows) pushItem(r);
+    }
+
     const blob = new Blob([lines.join('\n')], {type:'text/plain'});
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url; a.download = 'endpoints.txt'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
