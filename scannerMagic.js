@@ -1,10 +1,7 @@
-// scanner.js - Silent Endpoint & Secrets Scanner (bookmarklet)
-// - Silent: no processing logs shown
-// - Realtime filter refresh, remove jwt-like detection (too noisy)
-// - Export .txt behavior respects active filter; if 'all' then grouped by category
-// - Keeps existing detection features (params, firebase, keys, etc.)
-// - Ignore list excludes noisy CDNs but DOES NOT ignore jsdelivr or githack
-// Usage: load via bookmarklet loader
+// scanner.js - Silent Endpoint & Secrets Scanner (bookmarklet) - UPDATED (categories constrained)
+// - Categories: All, API, Fuzzing local, Fuzzing external, Sensitive information
+// - Sensitive includes firebase, aws, database, username/password, email, smtp, app_key, etc.
+// - Keeps progress bar, export behavior, copy, redact, ignore list, and previous detectors
 (async function(){
   // UI
   const panel = document.createElement('div');
@@ -12,7 +9,7 @@
     position: 'fixed',
     right: '12px',
     bottom: '12px',
-    width: '460px',
+    width: '520px',
     maxHeight: '76vh',
     overflowY: 'auto',
     backgroundColor: '#fff',
@@ -32,13 +29,18 @@
     <div style="display:flex;gap:6px;align-items:center">
       <select id="scan-filter" title="Filter" style="padding:4px;">
         <option value="all">All</option>
-        <option value="api">API-like</option>
-        <option value="local">Local only</option>
-        <option value="external">External only</option>
-        <option value="sensitive">Sensitive only</option>
-        <option value="firebase">Firebase only</option>
+        <option value="api">API</option>
+        <option value="fuzzing">Fuzzing local</option>
+        <option value="fuzzing-external">Fuzzing external</option>
+        <option value="sensitive">Sensitive information</option>
       </select>
       <label style="font-size:12px"><input id="detect-keys" type="checkbox" checked style="vertical-align:middle"> Detect</label>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+    <div id="scan-status" style="font-size:12px;color:#666">Ready</div>
+    <div style="flex:1;background:#f1f1f1;height:8px;border-radius:4px;overflow:hidden;margin-left:8px">
+      <div id="scan-progress" style="height:8px;width:0%;background:#0366d6"></div>
     </div>
   </div>
   <div id="results" style="max-height:60vh;overflow:auto;border-top:1px solid #eee;padding-top:8px"></div>
@@ -56,6 +58,8 @@
   const filterSelect = panel.querySelector('#scan-filter');
   const detectKeysCheckbox = panel.querySelector('#detect-keys');
   const includeRawCheckbox = panel.querySelector('#include-raw');
+  const scanStatus = panel.querySelector('#scan-status');
+  const scanProgressBar = panel.querySelector('#scan-progress');
 
   // config
   const MAX_DEPTH = 3;
@@ -72,7 +76,7 @@
     // NOTE: jsdelivr & githack are intentionally NOT excluded
   ];
 
-  // detectors (jwt detection removed to reduce noise)
+  // detectors (jwt detection intentionally removed)
   const DET = {
     firebaseApiKey: /AIza[0-9A-Za-z\-_]{35}/g,
     firebaseDB: /(https?:\/\/[A-Za-z0-9\-]+(?:\.firebaseio\.com|\.firebasedatabase\.app))(?:[:\/\w\-\.\?\=\&]*)/gi,
@@ -81,8 +85,13 @@
     googleClientId: /[0-9]{1,}-[0-9A-Za-z_]+\.apps\.googleusercontent\.com/g,
     awsKey: /\b(A3T|AKIA|ASIA)[A-Z0-9]{16}\b/g,
     longHex: /\b[0-9a-fA-F]{32,}\b/g,
-    pwdParam: /(?:password|pwd|pass|secret|token|api[_-]?key|apikey|access[_-]?token|client_secret|private_key)\s*(?:=|:)\s*['"]?([^\s'";,<>]{4,200})/gi,
-    urlWithPort: /https?:\/\/[^\s'"]+:\d{2,5}[^\s'"]*/gi
+    pwdParam: /(?:username|user|email|password|pwd|pass|secret|token|api[_-]?key|apikey|access[_-]?token|client_secret|private_key)\s*(?:=|:)\s*['"]?([^\s'";,<>]{4,200})/gi,
+    urlWithPort: /https?:\/\/[^\s'"]+:\d{2,5}[^\s'"]*/gi,
+    // added detectors for various sensitive info
+    dbConn: /(mongodb(?:\+srv)?:\/\/[^\s'"]+|postgres(?:ql)?:\/\/[^\s'"]+|mysql:\/\/[^\s'"]+|redis:\/\/[^\s'"]+)/gi,
+    smtpUrl: /(smtp:\/\/[^\s'"]+|smtp:[^\s'"]+|smtp\.[a-z0-9\.-]+\.[a-z]{2,})/gi,
+    appKey: /(?:app[_-]?key|application[_-]?key|client[_-]?id|client[_-]?secret)\s*(?:=|:)\s*['"]?([A-Za-z0-9\-_]{6,200})/gi,
+    emailLike: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g
   };
 
   function hostExcluded(host){
@@ -97,6 +106,18 @@
       return url.pathname.includes('/api/') || url.host.startsWith('api.') || /\/v\d+(\.|\/)/.test(url.pathname) || /\/graphql$/.test(url.pathname);
     }catch(e){
       return /\/api\//.test(u) || /:\w+/.test(u) || /\{.+\}/.test(u);
+    }
+  }
+
+  // Fuzzing detection: parameter-bearing URL (has ?= or path params)
+  function isParamBearing(u){
+    try{
+      const url = new URL(u, location.href);
+      if(url.search && url.search.includes('=')) return true;
+      if(/:\w+/.test(url.pathname) || /\{[^}]+\}/.test(url.pathname)) return true;
+      return false;
+    }catch(e){
+      return /[?].*=/.test(u) || /:\w+/.test(u) || /\{[^}]+\}/.test(u);
     }
   }
 
@@ -144,8 +165,12 @@
     for(const m of text.matchAll(DET.googleClientId) || []) res.push({type:'google_client_id', value:m[0]});
     for(const m of text.matchAll(DET.awsKey) || []) res.push({type:'aws_key', value:m[0]});
     for(const m of text.matchAll(DET.longHex) || []) res.push({type:'long_hex', value:m[0]});
-    for(const m of text.matchAll(DET.pwdParam) || []) { if(m[1] && m[1].length>3) res.push({type:'password_like', value:m[1]}); }
+    for(const m of text.matchAll(DET.pwdParam) || []) { if(m[1] && m[1].length>0) res.push({type:'credential_like', value:m[1]}); }
     for(const m of text.matchAll(DET.urlWithPort) || []) res.push({type:'url_with_port', value:m[0]});
+    for(const m of text.matchAll(DET.dbConn) || []) res.push({type:'database_conn', value:m[0]});
+    for(const m of text.matchAll(DET.smtpUrl) || []) res.push({type:'smtp_hint', value:m[0]});
+    for(const m of text.matchAll(DET.appKey) || []) { if(m[1] && m[1].length>0) res.push({type:'app_key', value:m[1]}); }
+    for(const m of text.matchAll(DET.emailLike) || []) res.push({type:'email', value:m[0]});
     // dedupe
     const uniq = [], seenv = new Set();
     for(const it of res){ const key = it.type + '|' + it.value; if(!seenv.has(key)){ seenv.add(key); uniq.push(it); } }
@@ -164,6 +189,19 @@
     return Array.from(s);
   }
 
+  // progress helpers
+  let totalResources = 0;
+  let processedResources = 0;
+  function setProgress(percent){
+    scanProgressBar.style.width = percent + '%';
+    scanStatus.textContent = `Scanning... ${percent}%`;
+  }
+  function incProgress(){
+    processedResources++;
+    const pct = totalResources ? Math.min(100, Math.round((processedResources/totalResources)*100)) : 100;
+    setProgress(pct);
+  }
+
   async function process(url, depth=0, source='root'){
     if(depth > MAX_DEPTH) return;
     let abs;
@@ -173,8 +211,14 @@
     addFound(abs, source);
     const params = extractParams(abs);
     for(const p of params) found.get(abs).params.add(p);
-    if(!isLocal(abs)) return;
+    // Only fetch same-origin (local) resources to avoid cross-origin noise
+    const local = isLocal(abs);
+    if(!local){
+      // we still add the resource entry (URL) but do not fetch its body
+      return;
+    }
     const text = await fetchTextQuiet(abs);
+    incProgress();
     if(!text) return;
     if(detectKeysCheckbox.checked){
       const sensitive = scanSensitive(text);
@@ -204,8 +248,17 @@
   });
   try{ extractCandidatesFromText(document.documentElement.outerHTML||document.body.innerHTML).forEach(p=>resources.add(p)); }catch(e){}
 
+  // initialize progress totals
+  totalResources = resources.size || 1;
+  processedResources = 0;
+  setProgress(0);
+
   // process all (silent)
   for(const r of resources){ await process(r, 0, 'resource'); }
+
+  // ensure progress complete
+  setProgress(100);
+  scanStatus.textContent = 'Scan complete';
 
   // rendering + filter behavior
   function redact(val){
@@ -213,6 +266,15 @@
     const s = String(val);
     if(s.length > 44) return s.slice(0,12) + '…' + s.slice(-12);
     return s;
+  }
+
+  // helper: determine if item is "sensitive" by types we want grouped into Sensitive information
+  function isSensitiveItem(meta){
+    if(!meta) return false;
+    if((meta.sensitive && meta.sensitive.length>0)) return true;
+    // additional heuristics: firebaseMeta keys
+    if(meta.firebaseMeta && Object.keys(meta.firebaseMeta).length>0) return true;
+    return false;
   }
 
   function buildList(){
@@ -230,12 +292,12 @@
     }
     const f = filterSelect.value;
     let filtered = list;
-    if(f === 'api') filtered = list.filter(i=>i.apiLike);
-    if(f === 'local') filtered = list.filter(i=>i.local);
-    if(f === 'external') filtered = list.filter(i=>!i.local);
-    if(f === 'sensitive') filtered = list.filter(i=>i.sensitive && i.sensitive.length>0);
-    if(f === 'firebase') filtered = list.filter(i=>Object.keys(i.firebaseMeta).length>0 || /firebaseio\.com|firebasedatabase\.app|firebaseapp\.com|storage\.googleapis\.com/.test(i.url));
-    filtered.sort((a,b) => (b.sensitive.length|0) - (a.sensitive.length|0) || (b.apiLike|0) - (a.apiLike|0));
+    if(f === 'api') filtered = list.filter(i=>i.apiLike && !isSensitiveItem(i));
+    if(f === 'fuzzing') filtered = list.filter(i=>i.local && isParamBearing(i.url) && !isSensitiveItem(i));
+    if(f === 'fuzzing-external') filtered = list.filter(i=>!i.local && isParamBearing(i.url) && !hostExcluded((() => { try { return new URL(i.url).host } catch(e){ return '' } })()));
+    if(f === 'sensitive') filtered = list.filter(i=>isSensitiveItem(i));
+    // 'all' returns everything (no filter)
+    filtered.sort((a,b) => (isSensitiveItem(b)?1:0) - (isSensitiveItem(a)?1:0) || (b.apiLike|0) - (a.apiLike|0));
     return filtered;
   }
 
@@ -244,12 +306,13 @@
     if(rows.length === 0){ resultsDiv.innerHTML = `<div style="color:#666">No endpoints found.</div>`; return; }
     const html = rows.map(it => {
       const sensHtml = (it.sensitive && it.sensitive.length>0) ? `<div style="margin-top:6px;color:#900;font-weight:600">⚠ Sensitive (${it.sensitive.length})</div><ul style="margin:6px 0 0 16px;color:#333">${it.sensitive.map(s=>`<li><strong>${escapeHtml(s.type)}</strong>: <code>${escapeHtml(redact(s.value))}</code></li>`).join('')}</ul>` : '';
-      const fbHtml = (it.firebaseMeta && Object.keys(it.firebaseMeta).length>0) ? `<div style="margin-top:6px;color:#0366d6"><strong>Firebase:</strong> ${Object.entries(it.firebaseMeta).map(([k,v])=>`${escapeHtml(k)}=${escapeHtml(redact(v))}`).join(', ')}</div>` : '';
+      const fbHtml = (it.firebaseMeta && Object.keys(it.firebaseMeta).length>0) ? `<div style="margin-top:6px;color:#0366d6"><strong>Firebase hints:</strong> ${Object.entries(it.firebaseMeta).map(([k,v])=>`${escapeHtml(k)}=${escapeHtml(redact(v))}`).join(', ')}</div>` : '';
       return `<div style="padding:8px;border-bottom:1px solid #eee">
         <div style="word-break:break-all"><a href="${it.url}" target="_blank" rel="noreferrer noopener">${escapeHtml(it.url)}</a></div>
         <div style="font-size:12px;color:#444;margin-top:6px">
           ${it.params.length?`params: ${escapeHtml(it.params.join(', '))} `:''}
           <span style="margin-left:8px;color:#666">src: ${escapeHtml(it.source)}</span>
+          <span style="margin-left:8px;color:#666">fuzzingCandidate: ${isParamBearing(it.url)}</span>
           <span style="margin-left:8px;color:#666">local: ${it.local}</span>
           <span style="margin-left:8px;color:#666">apiLike: ${it.apiLike}</span>
         </div>
@@ -282,14 +345,13 @@
     try{ await navigator.clipboard.writeText(out); alert(`Copied ${rows.length} items`); }catch(e){ const ta=document.createElement('textarea'); ta.value=out; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); alert('Copied (fallback)'); }
   };
 
-  // export .txt respects current filter
+  // export .txt respects current filter and groups when filter='all' into the requested categories
   panel.querySelector('#export-txt').onclick = ()=>{
     const f = filterSelect.value;
     const rows = buildList();
     const includeRaw = includeRawCheckbox.checked;
     const lines = [];
 
-    // helper to push item block
     function pushItem(r){
       lines.push(`URL: ${r.url}`);
       if(r.params.length) lines.push(`Params: ${r.params.join(', ')}`);
@@ -305,23 +367,21 @@
     }
 
     if(f === 'all'){
-      // group by category
-      const groups = { LOCAL:[], API:[], SENSITIVE:[], FIREBASE:[], EXTERNAL:[] };
+      // group into only the allowed categories: FUZZING LOCAL, FUZZING EXTERNAL, API, SENSITIVE, ALL (catch-all)
+      const groups = { FUZZING_LOCAL:[], FUZZING_EXTERNAL:[], API:[], SENSITIVE:[], ALL:[] };
       for(const r of rows){
-        if(r.sensitive && r.sensitive.length>0) groups.SENSITIVE.push(r);
-        else if(Object.keys(r.firebaseMeta||{}).length>0) groups.FIREBASE.push(r);
-        else if(r.local) groups.LOCAL.push(r);
+        if(isSensitiveItem(r)) groups.SENSITIVE.push(r);
+        else if(isParamBearing(r.url) && r.local) groups.FUZZING_LOCAL.push(r);
+        else if(isParamBearing(r.url) && !r.local) groups.FUZZING_EXTERNAL.push(r);
         else if(r.apiLike) groups.API.push(r);
-        else groups.EXTERNAL.push(r);
+        else groups.ALL.push(r); // catch-all falls under 'All' category
       }
-      // push groups in order
-      if(groups.LOCAL.length){ lines.push('=== LOCAL ENDPOINTS ===',''); groups.LOCAL.forEach(pushItem); lines.push(''); }
-      if(groups.API.length){ lines.push('=== API ENDPOINTS ===',''); groups.API.forEach(pushItem); lines.push(''); }
-      if(groups.SENSITIVE.length){ lines.push('=== SENSITIVE FINDINGS ===',''); groups.SENSITIVE.forEach(pushItem); lines.push(''); }
-      if(groups.FIREBASE.length){ lines.push('=== FIREBASE HINTS ===',''); groups.FIREBASE.forEach(pushItem); lines.push(''); }
-      if(groups.EXTERNAL.length){ lines.push('=== EXTERNAL ===',''); groups.EXTERNAL.forEach(pushItem); lines.push(''); }
+      if(groups.FUZZING_LOCAL.length){ lines.push('=== FUZZING (LOCAL) ===',''); groups.FUZZING_LOCAL.forEach(pushItem); lines.push(''); }
+      if(groups.FUZZING_EXTERNAL.length){ lines.push('=== FUZZING (EXTERNAL) ===',''); groups.FUZZING_EXTERNAL.forEach(pushItem); lines.push(''); }
+      if(groups.API.length){ lines.push('=== API ===',''); groups.API.forEach(pushItem); lines.push(''); }
+      if(groups.SENSITIVE.length){ lines.push('=== SENSITIVE INFORMATION ===',''); groups.SENSITIVE.forEach(pushItem); lines.push(''); }
+      if(groups.ALL.length){ lines.push('=== ALL (OTHER) ===',''); groups.ALL.forEach(pushItem); lines.push(''); }
     } else {
-      // export only current filtered rows
       for(const r of rows) pushItem(r);
     }
 
