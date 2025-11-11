@@ -1,25 +1,36 @@
-// silent-scanner-v4-final.js
-// Silent Scanner v4 - focused, fast, v2-like recall for HTML/JS/JSON/XML
-// - Whitelist extensions: .html .htm .js .json .xml
-// - Fetch bodies only same-origin; record external resources without deep-scan
-// - Modes: smart (MIME-aware but permissive), ext-only (strict by extension), aggressive (force fetch certain ext)
-// - Concurrency 5, MAX_DEPTH 3, real-time progress, export JSON manual
+// silent-scanner-v4-full.js
+// Silent Scanner v4 - focused on .html, .js, .json, .xml
+// - Whitelist extension: .html, .js, .json, .xml
+// - Fetch only same-host bodies; external resources are recorded but not fetched
+// - Modes: smart (MIME-aware permissive), ext-only (strict ext), aggressive (force-fetch whitelisted ext)
+// - Concurrency: 5, MAX_DEPTH: 3, caching of fetched URLs to avoid recheck
 // - Categories: All, API, Fuzzing local, Fuzzing external, Sensitive information, Misconfig
+// - Export JSON manual, progress overlay, copy/export text
 
 (async function(){
-  // --- UI ---
+  // ---------------- UI ----------------
   const panel = document.createElement('div');
   Object.assign(panel.style, {
-    position: 'fixed', right: '12px', bottom: '12px', width: '560px',
-    maxHeight: '78vh', overflowY: 'auto', backgroundColor: '#fff', color: '#111',
-    padding: '10px', zIndex: 2147483647, border: '1px solid #ddd',
-    borderRadius: '8px', boxShadow: '0 6px 18px rgba(0,0,0,0.12)',
-    fontFamily: 'Arial, sans-serif', fontSize: '13px'
+    position: 'fixed',
+    right: '12px',
+    bottom: '12px',
+    width: '560px',
+    maxHeight: '80vh',
+    overflowY: 'auto',
+    backgroundColor: '#fff',
+    color: '#111',
+    padding: '10px',
+    zIndex: 2147483647,
+    border: '1px solid #ddd',
+    borderRadius: '8px',
+    boxShadow: '0 6px 18px rgba(0,0,0,0.12)',
+    fontFamily: 'Arial, sans-serif',
+    fontSize: '13px'
   });
 
   panel.innerHTML = `
   <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px">
-    <strong style="font-size:14px">Silent Scanner v4 — focused</strong>
+    <strong style="font-size:14px">Silent Scanner v4 (final)</strong>
     <div style="display:flex;gap:6px;align-items:center">
       <select id="scan-filter" title="Filter" style="padding:4px;">
         <option value="all">All</option>
@@ -41,7 +52,7 @@
         <option value="ext-only">Ext-only</option>
         <option value="aggressive">Aggressive</option>
       </select>
-      <label style="font-size:12px"><input id="same-origin-only" type="checkbox" checked style="vertical-align:middle"> Same-origin fetch only</label>
+      <label style="font-size:12px"><input id="same-host-only" type="checkbox" checked style="vertical-align:middle"> Same-host only</label>
     </div>
     <div style="margin-left:auto;display:flex;gap:6px">
       <button id="start-scan" style="padding:6px 10px;background:#0366d6;color:#fff;border:none;border-radius:5px">Start</button>
@@ -59,7 +70,7 @@
   <div id="results" style="max-height:60vh;overflow:auto;border-top:1px solid #eee;padding-top:8px"></div>
 
   <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px;flex-wrap:wrap">
-    <div style="font-size:11px;color:#666;margin-right:auto" id="scan-info">Whitelist ext: .html .htm .js .json .xml. External bodies not fetched (listed only).</div>
+    <div style="font-size:11px;color:#666;margin-right:auto" id="scan-info">Whitelist ext: .html .js .json .xml — only fetch same-host; external listed only.</div>
     <label style="font-size:12px"><input id="include-raw" type="checkbox"> Include raw secrets</label>
     <button id="copy-all" style="padding:6px 8px">Copy</button>
     <button id="export-txt" style="padding:6px 8px">Export .txt</button>
@@ -83,13 +94,14 @@
   const startBtn = panel.querySelector('#start-scan');
   const stopBtn = panel.querySelector('#stop-scan');
   const modeSelect = panel.querySelector('#scan-mode');
-  const sameOriginOnlyCheckbox = panel.querySelector('#same-origin-only');
+  const sameHostOnlyCheckbox = panel.querySelector('#same-host-only');
 
-  // --- Config ---
+  // ---------------- Config ----------------
   const MAX_DEPTH = 3;
   const CONCURRENCY = 5;
-  const WHITELIST_EXT = new Set(['.html', '.htm', '.js', '.json', '.xml']);
+  const SCAN_EXTENSIONS = new Set(['.html', '.htm', '.js', '.json', '.xml']);
   const TEXT_MIME = new Set(['text/html','application/javascript','application/x-javascript','text/javascript','application/json','application/xml','text/xml','application/ld+json']);
+  // exclude common external hosts from deep scanning (still listed)
   const excludedHosts = [
     /(^|\.)googleapis\.com$/,
     /(^|\.)gstatic\.com$/,
@@ -101,9 +113,9 @@
     /(^|\.)unpkg\.com$/,
     /(^|\.)gravatar\.com$/
   ];
-  function hostExcluded(h){ try{ return excludedHosts.some(r=>r.test(h)); }catch(e){ return false; } }
+  function hostExcluded(host){ try{ return excludedHosts.some(r=>r.test(host)); }catch(e){ return false; } }
 
-  // --- detectors (copied + extended) ---
+  // ---------------- Detectors ----------------
   const DET = {
     firebaseApiKey: /AIza[0-9A-Za-z\-_]{35}/g,
     firebaseDB: /(https?:\/\/[A-Za-z0-9\-]+(?:\.firebaseio\.com|\.firebasedatabase\.app))(?:[:\/\w\-\.\?\=\&]*)/gi,
@@ -123,23 +135,23 @@
     gitPath: /(?:\.git\/HEAD|\.git\/config|\.gitignore)/i,
     envFile: /(^|\/)(?:\.env|env\.local|env\.development|\.env\.production)(?:$|\/|\?)/i,
     htpasswd: /(^|\/)(?:\.htpasswd|htpasswd)(?:$|\/|\?)/i,
-    configHints: /(composer\.json|package\.json|web\.config|appsettings\.json|.env)/i
+    configHints: /(composer\.json|package\.json|web\.config|appsettings\.json|\.env)/i
   };
 
-  // --- stores ---
-  const seen = new Set();
-  const found = new Map(); // url -> meta
-  const fetchCache = new Map(); // abs -> text|null
-  const fetchErrors = new Map();
-  const skipped = new Set();
+  // ---------------- Stores ----------------
+  const seen = new Set(); // URLs already processed (abs href)
+  const found = new Map(); // absHref -> meta
+  const fetchCache = new Map(); // absHref -> text|null
+  const fetchErrors = new Map(); // absHref -> [errors]
+  const skipped = new Set(); // skipped resources
   let stopRequested = false;
 
-  // helpers
-  function isLocal(u){
-    try{ const url = new URL(u, location.href); return url.origin === location.origin && !hostExcluded(url.host); }catch(e){ return false; }
+  // ---------------- Helpers ----------------
+  function isSameHost(u){
+    try{ const url = new URL(u, location.href); return url.host === location.host && !hostExcluded(url.host); }catch(e){ return false; }
   }
   function urlHasWhitelistExt(u){
-    try{ const pathname = new URL(u, location.href).pathname.toLowerCase(); const idx = pathname.lastIndexOf('.'); if(idx===-1) return false; return WHITELIST_EXT.has(pathname.substring(idx)); }catch(e){ return false; }
+    try{ const p = new URL(u, location.href).pathname.toLowerCase(); const idx = p.lastIndexOf('.'); if(idx===-1) return false; return SCAN_EXTENSIONS.has(p.substring(idx)); }catch(e){ return false; }
   }
   function registerFetchError(url, msg){
     try{ const abs = new URL(url, location.href).href; if(!fetchErrors.has(abs)) fetchErrors.set(abs, []); fetchErrors.get(abs).push(msg); }catch(e){}
@@ -148,7 +160,16 @@
     try{
       const abs = new URL(url, location.href).href;
       if(!found.has(abs)){
-        found.set(abs, { params: new Set(), sensitive: [], misconfig: [], source, local: isLocal(abs), apiLike: isApiLike(abs), firebaseMeta: {}, fetchErrors: [] });
+        found.set(abs, {
+          params: new Set(),
+          sensitive: [],
+          misconfig: [],
+          source,
+          local: isSameHost(abs),
+          apiLike: isApiLike(abs),
+          firebaseMeta: {},
+          fetchErrors: []
+        });
       } else {
         const meta = found.get(abs);
         const errs = fetchErrors.get(abs);
@@ -157,7 +178,6 @@
       return abs;
     }catch(e){ return null; }
   }
-
   function extractParams(u){
     const params = new Set();
     try{
@@ -168,61 +188,62 @@
     }catch(e){}
     return params;
   }
-
   function isApiLike(u){
     try{
       const url = new URL(u, location.href);
       const path = (url.pathname||'').toLowerCase();
-      if(path.includes('/api/')||path.includes('/graphql')||/\/v\d+(\.|\/)/.test(path)||path.includes('/_next/data/')) return true;
-      if(url.host.startsWith('api.')||url.pathname.match(/\/(api|graphql|services|rest|v\d+)\b/)) return true;
+      if(path.includes('/api/') || path.includes('/graphql') || /\/v\d+(\.|\/)/.test(path) || path.includes('/_next/data/')) return true;
+      if(url.host.startsWith('api.') || url.pathname.match(/\/(api|graphql|services|rest|v\d+)\b/)) return true;
       return false;
     }catch(e){
-      if(/\/api\//i.test(u)||/graphql/i.test(u)||/_next\/data/i.test(u)) return true;
+      if(/\/api\//i.test(u) || /graphql/i.test(u) || /_next\/data/i.test(u)) return true;
       if(/apikey|api[_-]?key|authorization\s*[:=]\s*bearer/i.test(u)) return true;
       return false;
     }
   }
 
-  // ---- lightweight fetch logic ----
-  async function shouldFetchResource(url, mode, preferSameOrigin){
+  // ---------------- Fetch policy ----------------
+  // mode: 'ext-only' | 'smart' | 'aggressive'
+  async function shouldFetchResource(url, mode, preferSameHost){
     try{
       const parsed = new URL(url, location.href);
-      if(preferSameOrigin && parsed.origin !== location.origin) return false;
+      // preferSameHost means only fetch if same host
+      if(preferSameHost && parsed.host !== location.host) return false;
+      // if host excluded, do not fetch
       if(hostExcluded(parsed.host)) return false;
 
-      // ext-only mode: strictly require extension in whitelist
-      if(mode === 'ext-only') return urlHasWhitelistExt(url);
+      // ext-only mode: require whitelist extension
+      if(mode === 'ext-only') return urlHasWhitelistExt(url) && parsed.host === location.host;
 
-      // aggressive mode: allow same-origin common ext
+      // aggressive: fetch any same-host resource with whitelist ext
       if(mode === 'aggressive'){
+        if(parsed.host !== location.host) return false;
         const p = parsed.pathname.toLowerCase();
-        if(p.endsWith('.js')||p.endsWith('.json')||p.endsWith('.xml')||p.endsWith('.html')||p.endsWith('.htm')) return parsed.origin===location.origin;
+        if(p.endsWith('.js')||p.endsWith('.json')||p.endsWith('.xml')||p.endsWith('.html')||p.endsWith('.htm')) return true;
+        return false;
       }
 
-      // prefer fetching .js/.json/.xml on same origin
-      const pth = parsed.pathname.toLowerCase();
-      if(pth.endsWith('.js')||pth.match(/\.chunk\.js$/)||pth.endsWith('.json')||pth.endsWith('.xml')) return parsed.origin===location.origin;
-
-      // smart: HEAD check same-origin for content-type, but be permissive
-      if(parsed.origin === location.origin){
+      // smart mode: HEAD check same-host
+      if(parsed.host === location.host){
         try{
           const r = await fetch(parsed.href, { method: 'HEAD', credentials: 'same-origin', signal: AbortSignal.timeout(2500) });
           const ct = r.headers.get('content-type') || '';
           const mime = ct.split(';')[0].toLowerCase();
-          if(!mime) return true; // unknown, allow GET fallback
-          // allow text-like or JSON/XML or JS; otherwise skip only binary types
+          if(!mime) return urlHasWhitelistExt(url); // unknown -> rely on extension
+          // accept text-like and json/xml/js, deny image/video/audio
           if(Array.from(TEXT_MIME).some(m => mime.includes(m))) return true;
           if(mime.startsWith('text/')) return true;
-          if(mime.startsWith('image/')||mime.startsWith('video/')||mime.startsWith('audio/')) return false;
-          // unknown other types -> allow if extension matches whitelist
+          if(mime.startsWith('image/') || mime.startsWith('video/') || mime.startsWith('audio/')) return false;
+          // otherwise allow if extension in whitelist
           return urlHasWhitelistExt(url);
         }catch(e){
           registerFetchError(parsed.href, `HEAD_ERR:${String(e && e.message ? e.message : e)}`);
-          // fallback: allow GET if same-origin and ext matches whitelist
-          return parsed.origin===location.origin && urlHasWhitelistExt(url);
+          // fallback: allow GET for whitelist ext on same host
+          return (parsed.host === location.host) && urlHasWhitelistExt(url);
         }
       }
-      // cross-origin: do not fetch body
+
+      // cross-host: do not fetch body
       return false;
     }catch(e){
       return false;
@@ -234,23 +255,30 @@
     try{ abs = new URL(url, location.href).href; }catch(e){ return null; }
     if(fetchCache.has(abs)) return fetchCache.get(abs);
 
-    // only fetch same-origin
-    try{ const p = new URL(abs); if(p.origin !== location.origin){ fetchCache.set(abs, null); skipped.add(abs); return null; } }catch(e){}
+    // only fetch same-host bodies
+    try{ const p = new URL(abs); if(p.host !== location.host){ fetchCache.set(abs, null); skipped.add(abs); return null; } }catch(e){}
 
     try{
-      const r = await fetch(abs, { credentials: 'same-origin', signal: AbortSignal.timeout(7000) });
-      if(!r.ok){ registerFetchError(abs, `HTTP_${r.status}`); fetchCache.set(abs, null); return null; }
+      const r = await fetch(abs, { credentials: 'same-origin', signal: AbortSignal.timeout(8000) });
+      if(!r.ok){
+        registerFetchError(abs, `HTTP_${r.status}`);
+        fetchCache.set(abs, null);
+        return null;
+      }
       const ct = (r.headers.get('content-type')||'').split(';')[0].toLowerCase();
       const pathname = new URL(abs).pathname.toLowerCase();
-      const looksLikeJs = pathname.endsWith('.js')||pathname.match(/\.chunk\.js$/);
+      const looksLikeJs = pathname.endsWith('.js') || pathname.match(/\.chunk\.js$/);
       const looksLikeJson = pathname.endsWith('.json');
       const looksLikeXml = pathname.endsWith('.xml');
-      if(ct && !Array.from(TEXT_MIME).some(m=>ct.includes(m)) && !looksLikeJs && !looksLikeJson && !looksLikeXml){
-        fetchCache.set(abs, null); skipped.add(abs); return null;
+      // if content-type exists and is clearly binary and url not explicitly js/json/xml, skip
+      if(ct && !Array.from(TEXT_MIME).some(m => ct.includes(m)) && !looksLikeJs && !looksLikeJson && !looksLikeXml){
+        fetchCache.set(abs, null);
+        skipped.add(abs);
+        return null;
       }
-      const text = await r.text();
-      fetchCache.set(abs, text);
-      return text;
+      const txt = await r.text();
+      fetchCache.set(abs, txt);
+      return txt;
     }catch(e){
       registerFetchError(abs, String(e && e.message ? e.message : e));
       fetchCache.set(abs, null);
@@ -258,49 +286,52 @@
     }
   }
 
-  // ---- detection/parsing ----
-  function contextHasKeywords(text, index, keys, r=60){
+  // ---------------- Content analysis ----------------
+  function contextHasKeywords(text, index, keywords, radius=60){
     if(!text) return false;
-    const s = text.slice(Math.max(0,index-r), Math.min(text.length, index+r)).toLowerCase();
-    return keys.some(k => s.includes(k));
+    const start = Math.max(0, index - radius);
+    const end = Math.min(text.length, index + radius);
+    const snippet = text.slice(start, end).toLowerCase();
+    return keywords.some(k => snippet.includes(k));
   }
 
   function scanSensitive(text){
     if(!text) return [];
     const res = [];
-    for(const m of text.matchAll(DET.firebaseApiKey) || []) res.push({type:'firebase_api_key', value:m[0], index:m.index});
-    for(const m of text.matchAll(DET.firebaseDB) || []) res.push({type:'firebase_database_url', value:m[1], index:m.index});
-    for(const m of text.matchAll(DET.firebaseProjectId) || []) res.push({type:'firebase_project_id', value:m[1], index:m.index});
-    for(const m of text.matchAll(DET.firebaseStorage) || []) res.push({type:'firebase_storage_bucket', value:m[1], index:m.index});
-    for(const m of text.matchAll(DET.googleClientId) || []) res.push({type:'google_client_id', value:m[0], index:m.index});
-    for(const m of text.matchAll(DET.awsKey) || []) res.push({type:'aws_key', value:m[0], index:m.index});
-    for(const m of text.matchAll(DET.longHex) || []) res.push({type:'long_hex', value:m[1]||m[0], index:m.index});
-    for(const m of text.matchAll(DET.pwdParam) || []) if(m[1]) res.push({type:'credential_like', value:m[1], index:m.index});
-    for(const m of text.matchAll(DET.dbConn) || []) res.push({type:'database_conn', value:m[0], index:m.index});
-    for(const m of text.matchAll(DET.smtpUrl) || []) res.push({type:'smtp_hint', value:m[0], index:m.index});
-    for(const m of text.matchAll(DET.appKey) || []) if(m[1]) res.push({type:'app_key', value:m[1], index:m.index});
-    for(const m of text.matchAll(DET.emailLike) || []) res.push({type:'email', value:m[0], index:m.index});
-    for(const m of text.matchAll(DET.base64Long) || []) res.push({type:'base64_long', value:m[0], index:m.index});
-    for(const m of text.matchAll(DET.jwtLike) || []) res.push({type:'jwt_like', value:m[1]||m[0], index:m.index});
-    for(const m of text.matchAll(DET.gitPath) || []) res.push({type:'git_exposed', value:m[0], index:m.index});
-    for(const m of text.matchAll(DET.envFile) || []) res.push({type:'env_filename', value:m[0], index:m.index});
-    for(const m of text.matchAll(DET.htpasswd) || []) res.push({type:'htpasswd', value:m[0], index:m.index});
-    for(const m of text.matchAll(DET.configHints) || []) res.push({type:'config_hint', value:m[0], index:m.index});
+    for(const m of text.matchAll(DET.firebaseApiKey) || []) res.push({ type:'firebase_api_key', value:m[0], index:m.index });
+    for(const m of text.matchAll(DET.firebaseDB) || []) res.push({ type:'firebase_database_url', value:m[1], index:m.index });
+    for(const m of text.matchAll(DET.firebaseProjectId) || []) res.push({ type:'firebase_project_id', value:m[1], index:m.index });
+    for(const m of text.matchAll(DET.firebaseStorage) || []) res.push({ type:'firebase_storage_bucket', value:m[1], index:m.index });
+    for(const m of text.matchAll(DET.googleClientId) || []) res.push({ type:'google_client_id', value:m[0], index:m.index });
+    for(const m of text.matchAll(DET.awsKey) || []) res.push({ type:'aws_key', value:m[0], index:m.index });
+    for(const m of text.matchAll(DET.longHex) || []) res.push({ type:'long_hex', value:m[1] || m[0], index:m.index });
+    for(const m of text.matchAll(DET.pwdParam) || []) if(m[1]) res.push({ type:'credential_like', value:m[1], index:m.index });
+    for(const m of text.matchAll(DET.urlWithPort) || []) res.push({ type:'url_with_port', value:m[0], index:m.index });
+    for(const m of text.matchAll(DET.dbConn) || []) res.push({ type:'database_conn', value:m[0], index:m.index });
+    for(const m of text.matchAll(DET.smtpUrl) || []) res.push({ type:'smtp_hint', value:m[0], index:m.index });
+    for(const m of text.matchAll(DET.appKey) || []) if(m[1]) res.push({ type:'app_key', value:m[1], index:m.index });
+    for(const m of text.matchAll(DET.emailLike) || []) res.push({ type:'email', value:m[0], index:m.index });
+    for(const m of text.matchAll(DET.base64Long) || []) res.push({ type:'base64_long', value:m[0], index:m.index });
+    for(const m of text.matchAll(DET.jwtLike) || []) res.push({ type:'jwt_like', value:m[1] || m[0], index:m.index });
+    for(const m of text.matchAll(DET.gitPath) || []) res.push({ type:'git_exposed', value:m[0], index:m.index });
+    for(const m of text.matchAll(DET.envFile) || []) res.push({ type:'env_filename', value:m[0], index:m.index });
+    for(const m of text.matchAll(DET.htpasswd) || []) res.push({ type:'htpasswd', value:m[0], index:m.index });
+    for(const m of text.matchAll(DET.configHints) || []) res.push({ type:'config_hint', value:m[0], index:m.index });
 
-    // heuristics + dedupe
+    // dedupe and heuristics
     const uniq = [], seenSet = new Set();
     for(const it of res){
       const key = it.type + '|' + it.value;
       if(seenSet.has(key)) continue;
-      // for noisy types require keyword context
+      // heuristics for noisy types
       if(['long_hex','base64_long','jwt_like'].includes(it.type)){
         if(!contextHasKeywords(text, it.index, ['key','token','secret','auth','password','api','client','bearer','jwt','session','access','private','db'])) continue;
       }
       if(it.type === 'email'){
         const near = contextHasKeywords(text, it.index, ['user','email','password','db','login','account']);
         if(!near){
-          const countEmails = (text.match(DET.emailLike)||[]).length;
-          if(countEmails>15) continue;
+          const countEmails = (text.match(DET.emailLike) || []).length;
+          if(countEmails > 15) continue;
         }
       }
       seenSet.add(key);
@@ -312,21 +343,25 @@
   function extractCandidatesFromText(text){
     if(!text) return [];
     const set = new Set();
+    // quoted urls/paths
     const re1 = /['"]((?:https?:\/\/|\/\/|\/|\.\.\/|\.\/)[^'"]{1,900})['"]/g;
     for(const m of text.matchAll(re1)) set.add(m[1]);
+    // template/backtick strings
     const re2 = /`([^`]{1,900})`/g;
     for(const m of text.matchAll(re2)) set.add(m[1].replace(/\$\{[^}]+\}/g,'{param}'));
+    // AJAX/fetch/axios
     const ajaxRe = /(?:fetch|axios\.(?:get|post|put|delete|patch)|open|XMLHttpRequest|new\s+Request)\s*\(\s*['"`]((?:https?:\/\/|\/|\.\.\/|\.\/)[^'"`]{1,900})['"`]/g;
     for(const m of text.matchAll(ajaxRe)) set.add(m[1].replace(/\$\{[^}]+\}/g,'{param}'));
+    // paths that look like endpoints
     const pathRe = /['"]((?:\/[a-zA-Z0-9_\-\/\.]{3,300}(?:api|graphql)[\/a-zA-Z0-9_\-\.]*)['"])/g;
     for(const m of text.matchAll(pathRe)) set.add(m[1]);
-    // also catch strings that look like /api/... without quotes
+    // bare /api/... patterns
     const bareApi = /(?:\s|:|=)(\/api\/[a-zA-Z0-9_\-\/\.\{\}]+)/g;
     for(const m of text.matchAll(bareApi)) set.add(m[1]);
     return Array.from(set);
   }
 
-  // ---- progress & concurrency ----
+  // ---------------- Progress & concurrency ----------------
   let totalResources = 0, processedResources = 0, skippedResources = 0;
   function setProgress(pct){
     scanProgressBar.style.width = pct + '%';
@@ -339,7 +374,7 @@
   function pLimit(concurrency){
     const queue = []; let active = 0;
     const next = () => {
-      if(queue.length===0) return;
+      if(queue.length === 0) return;
       if(active >= concurrency) return;
       active++;
       const item = queue.shift();
@@ -350,8 +385,8 @@
   }
   const limit = pLimit(CONCURRENCY);
 
-  // ---- main recursive process ----
-  async function processResource(url, depth=0, source='root', mode='smart', preferSameOrigin=true){
+  // ---------------- Main recursive process ----------------
+  async function processResource(url, depth=0, source='root', mode='smart', preferSameHost=true){
     if(stopRequested) return;
     if(depth > MAX_DEPTH) return;
     let abs;
@@ -363,22 +398,21 @@
     const params = extractParams(abs);
     for(const p of params) found.get(abs).params.add(p);
 
-    // external? record but don't fetch body
-    const local = isLocal(abs);
+    const local = isSameHost(abs);
     if(!local){
-      // still include in results (external endpoints)
+      // external: include as endpoint but don't fetch body
       incProgress();
       return;
     }
 
-    // check extension: if ext-only mode and no whitelist ext, skip
+    // ext-only mode: if no whitelist ext, skip
     if(mode === 'ext-only' && !urlHasWhitelistExt(abs)){ skipped.add(abs); incSkipped(); return; }
 
-    // should fetch?
-    const shouldFetch = await shouldFetchResource(abs, mode, preferSameOrigin);
-    if(!shouldFetch){ skipped.add(abs); incSkipped(); fetchCache.set(abs, null); return; }
+    // check shouldFetchResource
+    const doFetch = await shouldFetchResource(abs, mode, preferSameHost);
+    if(!doFetch){ skipped.add(abs); incSkipped(); fetchCache.set(abs, null); return; }
 
-    // cached?
+    // returned from cache?
     if(fetchCache.has(abs)){
       const cached = fetchCache.get(abs);
       incProgress();
@@ -387,8 +421,11 @@
           const sens = scanSensitive(cached);
           for(const s of sens){
             const snippet = cached.slice(Math.max(0, (s.index||0)-40), Math.min(cached.length, (s.index||0)+40)).replace(/\s+/g,' ');
-            if(['git_exposed','env_filename','htpasswd','config_hint'].includes(s.type)) found.get(abs).misconfig.push(Object.assign({}, s, {context: snippet}));
-            else { found.get(abs).sensitive.push(Object.assign({}, s, {context: snippet})); if(s.type && s.type.startsWith('firebase')) found.get(abs).firebaseMeta[s.type] = s.value; }
+            if(['git_exposed','env_filename','htpasswd','config_hint'].includes(s.type)) found.get(abs).misconfig.push(Object.assign({}, s, { context: snippet }));
+            else {
+              found.get(abs).sensitive.push(Object.assign({}, s, { context: snippet }));
+              if(s.type && s.type.startsWith('firebase')) found.get(abs).firebaseMeta[s.type] = s.value;
+            }
           }
         }
         const cands = extractCandidatesFromText(cached);
@@ -398,8 +435,8 @@
             addFound(res, abs);
             const ps = extractParams(c);
             for(const p of ps) found.get(res).params.add(p);
-            if(isLocal(res) || isApiLike(c) || isApiLike(res)){
-              await limit(()=>processResource(res, depth+1, abs, mode, preferSameOrigin));
+            if(isSameHost(res) || isApiLike(c) || isApiLike(res)){
+              await limit(()=>processResource(res, depth+1, abs, mode, preferSameHost));
             }
           }catch(e){}
         }
@@ -407,7 +444,7 @@
       return;
     }
 
-    // fetch
+    // perform fetch
     const text = await fetchTextQuiet(abs);
     incProgress();
     if(fetchErrors.has(abs)){
@@ -416,17 +453,20 @@
     }
     if(!text) return;
 
-    // detect
+    // analyze
     if(detectKeysCheckbox.checked){
       const sens = scanSensitive(text);
       for(const s of sens){
         const snippet = text.slice(Math.max(0, (s.index||0)-40), Math.min(text.length, (s.index||0)+40)).replace(/\s+/g,' ');
-        if(['git_exposed','env_filename','htpasswd','config_hint'].includes(s.type)) found.get(abs).misconfig.push(Object.assign({}, s, {context: snippet}));
-        else { found.get(abs).sensitive.push(Object.assign({}, s, {context: snippet})); if(s.type && s.type.startsWith('firebase')) found.get(abs).firebaseMeta[s.type] = s.value; }
+        if(['git_exposed','env_filename','htpasswd','config_hint'].includes(s.type)) found.get(abs).misconfig.push(Object.assign({}, s, { context: snippet }));
+        else {
+          found.get(abs).sensitive.push(Object.assign({}, s, { context: snippet }));
+          if(s.type && s.type.startsWith('firebase')) found.get(abs).firebaseMeta[s.type] = s.value;
+        }
       }
     }
 
-    // extract candidates and recurse for local or API-like
+    // extract candidates & recurse
     const candidates = extractCandidatesFromText(text);
     for(const c of candidates){
       try{
@@ -434,14 +474,14 @@
         addFound(resolved, abs);
         const ps = extractParams(c);
         for(const p of ps) found.get(resolved).params.add(p);
-        if(isLocal(resolved) || isApiLike(c) || isApiLike(resolved)){
-          await limit(()=>processResource(resolved, depth+1, abs, mode, preferSameOrigin));
+        if(isSameHost(resolved) || isApiLike(c) || isApiLike(resolved)){
+          await limit(()=>processResource(resolved, depth+1, abs, mode, preferSameHost));
         }
       }catch(e){}
     }
   }
 
-  // gather initial resources more aggressively like v2 but filtered to whitelist ext
+  // ---------------- Gather initial candidates (aggressive like v2 but filtered) ----------------
   function gatherInitialCandidates(){
     const set = new Set();
     try{ performance.getEntriesByType('resource').map(r=>r.name).forEach(u=>set.add(u)); }catch(e){}
@@ -449,18 +489,18 @@
     document.querySelectorAll('link[href]').forEach(l => set.add(l.href));
     document.querySelectorAll('a[href]').forEach(a => set.add(a.href));
     document.querySelectorAll('form[action]').forEach(f => set.add(f.action));
-    // inline scripts - include for candidate extraction (but not fetch as resource)
+    // inline scripts: only extract candidates (we do not treat them as separate fetch resources)
     document.querySelectorAll('script:not([src])').forEach(s=>{
-      try{ const c = s.textContent || ''; extractCandidatesFromText(c).forEach(p=>set.add(p)); }catch(e){}
+      try{ const t = s.textContent || ''; extractCandidatesFromText(t).forEach(p=>set.add(p)); }catch(e){}
     });
+    // full HTML scanning for inline endpoints
     try{ const html = document.documentElement.outerHTML || document.body.innerHTML || ''; extractCandidatesFromText(html).forEach(p=>set.add(p)); }catch(e){}
-    // only keep strings that look like possible endpoints or resources; prefer those with whitelist ext OR api-like
-    const arr = Array.from(set).map(u=>{ try{ return new URL(u, location.href).href }catch(e){ return u }});
-    // dedupe and return
+    // return deduped absolute or relative list
+    const arr = Array.from(set).map(u => { try { return new URL(u, location.href).href } catch(e){ return u } });
     return Array.from(new Set(arr));
   }
 
-  // build list & render
+  // ---------------- Build list, render ----------------
   function isSensitiveItem(meta){
     if(!meta) return false;
     if(meta.sensitive && meta.sensitive.length>0) return true;
@@ -524,7 +564,7 @@
   function redact(v){ if(!v) return ''; const s=String(v); return s.length>44 ? s.slice(0,12)+'…'+s.slice(-12) : s; }
   function escapeHtml(s){ if(!s) return ''; return String(s).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
-  // copy/export
+  // copy/export actions
   panel.querySelector('#copy-all').onclick = async ()=>{
     const rows = buildList();
     const includeRaw = includeRawCheckbox.checked;
@@ -556,7 +596,7 @@
       if(r.fetchErrors && r.fetchErrors.length) lines.push(`Fetch issues: ${r.fetchErrors.join('; ')}`);
       lines.push('');
     }
-    // group similar to v2
+    // grouping similar to v2
     const groups = { FUZZING_LOCAL:[], FUZZING_EXTERNAL:[], API:[], SENSITIVE:[], MISCONFIG:[], ALL:[] };
     for(const r of rows){
       if(r.misconfig && r.misconfig.length) groups.MISCONFIG.push(r);
@@ -593,14 +633,14 @@
       firebaseMeta: r.firebaseMeta,
       fetchErrors: r.fetchErrors
     }));
-    const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({ scanned: processedResources, found: out }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url; a.download = 'result-v4.json'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
   };
 
   panel.querySelector('#close-panel').onclick = ()=> panel.remove();
 
-  // utility isParamBearing
+  // utility - isParamBearing
   function isParamBearing(u){
     try{
       const url = new URL(u, location.href);
@@ -612,34 +652,30 @@
     }
   }
 
-  // initial state
+  // initial UI state
   resultsDiv.innerHTML = `<div style="color:#666">Ready. Choose mode and press Start.</div>`;
   scanProgressBar.style.width = '0%';
   scanProgressBar.parentElement.style.visibility = 'visible';
 
-  // start/stop
+  // ---------------- Start/Stop logic ----------------
   startBtn.onclick = async ()=>{
     stopRequested = false;
     totalResources = 0; processedResources = 0; skippedResources = 0;
     seen.clear(); found.clear(); fetchCache.clear(); fetchErrors.clear(); skipped.clear();
     resultsDiv.innerHTML = `<div style="color:#666">Scanning... please wait.</div>`;
     const mode = modeSelect.value;
-    const preferSameOrigin = !!sameOriginOnlyCheckbox.checked;
+    const preferSameHost = !!sameHostOnlyCheckbox.checked;
 
-    // gather initial candidates
     const inits = gatherInitialCandidates();
-    // filter initial list: keep those with whitelist ext or api-like or inline candidates
+    // filter initial: keep those with whitelist ext or api-like or relative paths
     const filtered = inits.filter(u=>{
       try{
         const nu = new URL(u, location.href);
-        // prefer same-origin first, but include external in listing
         if(urlHasWhitelistExt(nu.href)) return true;
         if(isApiLike(nu.href)) return true;
-        // include inline-looking / relative paths
         if(nu.pathname && (nu.pathname.includes('/api/') || nu.pathname.includes('api'))) return true;
         return false;
       }catch(e){
-        // include if looks like /api/ or /somepath.js
         if(/\/api\//.test(String(u))) return true;
         if(/\.(js|json|xml|html|htm)(?:$|\?)/i.test(String(u))) return true;
         return false;
@@ -651,15 +687,13 @@
     processedResources = 0; skippedResources = 0;
     setProgress(0);
 
-    // schedule tasks
     const tasks = [];
     for(const r of unique){
-      tasks.push(limit(()=>processResource(r, 0, 'root', mode, preferSameOrigin)));
+      tasks.push(limit(()=>processResource(r, 0, 'root', mode, preferSameHost)));
     }
     await Promise.all(tasks);
     setProgress(100);
     scanStatus.textContent = `Scan complete — Found ${found.size} endpoints`;
-    // hide progress visually after short delay
     setTimeout(()=>{ scanProgressBar.style.width='0%'; scanProgressBar.parentElement.style.visibility='hidden'; }, 400);
     render();
   };
@@ -669,5 +703,5 @@
   filterSelect.onchange = render;
   detectKeysCheckbox.onchange = render;
 
-  // done
+  // ---------------- End ----------
 })();
