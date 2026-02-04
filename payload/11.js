@@ -1,1 +1,0 @@
-prompt(document.cookie)
